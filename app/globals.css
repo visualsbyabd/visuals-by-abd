@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-display: "Space Grotesk", system-ui, sans-serif;
+    --font-body: "Inter", system-ui, sans-serif;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-ink text-bone font-sans;
+    background-image:
+      radial-gradient(circle at 20% 0%, rgba(214, 40, 40, 0.08) 0%, transparent 50%),
+      radial-gradient(circle at 80% 80%, rgba(214, 40, 40, 0.04) 0%, transparent 50%);
+  }
+
+  ::selection {
+    @apply bg-fire text-bone;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-ink-950;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-ink-700 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-fire-dim;
+  }
+}
+
+@layer components {
+  /* Editorial display heading — used for hero & section titles */
+  .display-xl {
+    @apply font-display font-medium tracking-tightest leading-[0.92];
+    font-size: clamp(2.75rem, 8vw, 7.5rem);
+  }
+  .display-lg {
+    @apply font-display font-medium tracking-tightest leading-[0.95];
+    font-size: clamp(2.25rem, 6vw, 5rem);
+  }
+  .display-md {
+    @apply font-display font-medium tracking-tight leading-[1];
+    font-size: clamp(1.75rem, 4vw, 3rem);
+  }
+
+  /* Eyebrow / kicker label */
+  .eyebrow {
+    @apply font-sans text-xs uppercase tracking-[0.25em] text-bone-300;
+  }
+
+  /* Premium glow underlay */
+  .glow-fire::before {
+    content: "";
+    @apply absolute inset-0 -z-10 blur-3xl opacity-40;
+    background: radial-gradient(ellipse at center, #D62828 0%, transparent 60%);
+  }
+
+  /* Grain overlay for cinematic depth */
+  .grain::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+    opacity: 0.04;
+    mix-blend-mode: overlay;
+  }
+
+  /* Hairline divider */
+  .hairline {
+    @apply block h-px w-full bg-gradient-to-r from-transparent via-ink-700 to-transparent;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .text-pretty {
+    text-wrap: pretty;
+  }
+}
