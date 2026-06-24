@@ -5,7 +5,13 @@ import { useSession } from "next-auth/react";
 import { ArrowUpRight, LogIn, LayoutDashboard } from "lucide-react";
 
 export function AuthNavButton({ variant = "desktop" }: { variant?: "desktop" | "mobile" }) {
-  const { data: session, status } = useSession();
+  // Defensive call: in some Auth.js v5 beta versions, useSession() can return
+  // undefined entirely (not { data: undefined, status: "loading" } as in v4).
+  // The optional chain below treats that exactly like a still-loading session,
+  // which is the safe default — the button just renders the loading skeleton.
+  const sessionResult = useSession();
+  const session = sessionResult?.data;
+  const status = sessionResult?.status ?? "loading";
 
   // Loading — render a placeholder of the same shape so layout doesn't jump
   if (status === "loading") {

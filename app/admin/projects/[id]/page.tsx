@@ -23,8 +23,20 @@ export const dynamic = "force-dynamic";
 async function getProjectData(id: string) {
   try {
     await connectDB();
-    const project = await Project.findById(id).lean();
+    // Same gateway-mitigation as the public page: only fetch the first batch of
+    // media items, then expose the remainder via "Load more" in the panel.
+    const ADMIN_INITIAL_MEDIA_PAGE = 5;
+    const project = await Project.findById(id, {
+      media: { $slice: ADMIN_INITIAL_MEDIA_PAGE },
+    }).lean();
     if (!project) return null;
+
+    // Total count for the Load more affordance.
+    const [agg] = await Project.aggregate([
+      { $match: { _id: project._id } },
+      { $project: { count: { $size: { $ifNull: ["$media", []] } } } },
+    ]);
+    const totalMedia = (agg?.count as number) ?? 0;
     const [clients, deliverables, milestones, rawTasks, rawRevisions] = await Promise.all([
       Client.find({ status: "active" }).sort({ name: 1 }).select("name company").lean(),
       Deliverable.find({ project: id }).sort({ createdAt: -1 }).lean(),
@@ -79,11 +91,17 @@ async function getProjectData(id: string) {
     }));
 
     const media: ProjectMediaItem[] = (project.media ?? [])
-      .map((m: { type: "image" | "video"; url: string; thumbnail?: string; alt?: string; order: number }) => ({
+      .map((m: ProjectMediaItem) => ({
         type: m.type,
         url: m.url,
         thumbnail: m.thumbnail,
         alt: m.alt,
+        title: m.title,
+        description: m.description,
+        tags: m.tags ?? [],
+        featured: !!m.featured,
+        duration: m.duration,
+        orientation: m.orientation,
         order: m.order ?? 0,
       }))
       .sort((a, b) => a.order - b.order);
@@ -115,6 +133,7 @@ async function getProjectData(id: string) {
       tasks,
       revisions,
       media,
+      totalMedia,
     };
   } catch {
     return null;
@@ -126,7 +145,7 @@ export default async function EditProjectPage({ params }: { params: Promise<{ id
   const { id } = await params;
   const data = await getProjectData(id);
   if (!data || !session?.user) notFound();
-  const { project, clients, deliverables, milestones, tasks, revisions, media } = data;
+  const { project, clients, deliverables, milestones, tasks, revisions, media, totalMedia } = data;
 
   return (
     <div className="space-y-10">
@@ -149,6 +168,7 @@ export default async function EditProjectPage({ params }: { params: Promise<{ id
       <ProjectMediaPanel
         projectId={String(project._id)}
         media={media}
+        totalMedia={totalMedia}
         mediaLayout={project.mediaLayout ?? "mixed"}
       />
 

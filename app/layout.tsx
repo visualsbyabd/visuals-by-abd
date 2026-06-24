@@ -1,60 +1,30 @@
-import type { Metadata } from "next";
-import { Inter, Space_Grotesk } from "next/font/google";
-import { Providers } from "@/components/providers";
-import { getSiteSettings } from "@/lib/settings";
-import "./globals.css";
+import { redirect } from "next/navigation";
+import { auth } from "@/lib/auth";
+import { PortalSidebar } from "@/components/portal/sidebar";
+import { PortalTopbar } from "@/components/portal/topbar";
+import { connectDB } from "@/lib/mongodb";
+import { Notification } from "@/models/Notification";
 
-const display = Space_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-display",
-  display: "swap",
-});
+export default async function PortalLayout({ children }: { children: React.ReactNode }) {
+  const session = await auth();
+  if (!session?.user) redirect("/login");
 
-const body = Inter({
-  subsets: ["latin"],
-  variable: "--font-body",
-  display: "swap",
-});
+  // Get unread count for the notification bell
+  let unreadCount = 0;
+  try {
+    await connectDB();
+    unreadCount = await Notification.countDocuments({ user: session.user.id, read: false });
+  } catch {}
 
-export async function generateMetadata(): Promise<Metadata> {
-  const s = await getSiteSettings();
-  const title = s.defaultMetaTitle || `${s.siteName} — ${s.ownerName} · ${s.ownerRole}`;
-  const description = s.defaultMetaDescription || s.description || s.tagline;
-
-  return {
-    metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
-    title: {
-      default: title,
-      template: `%s — ${s.siteName}`,
-    },
-    description,
-    authors: [{ name: s.ownerName }],
-    creator: s.ownerName,
-    openGraph: {
-      type: "website",
-      locale: "en_US",
-      title,
-      description,
-      siteName: s.siteName,
-      images: s.defaultOgImage ? [s.defaultOgImage] : undefined,
-    },
-    twitter: {
-      card: "summary_large_image",
-      title,
-      description,
-      images: s.defaultOgImage ? [s.defaultOgImage] : undefined,
-    },
-    icons: s.favicon ? { icon: s.favicon } : undefined,
-    robots: { index: true, follow: true },
-  };
-}
-
-export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${display.variable} ${body.variable} dark`} suppressHydrationWarning>
-      <body className="min-h-screen antialiased">
-        <Providers>{children}</Providers>
-      </body>
-    </html>
+    <div className="min-h-screen bg-ink flex">
+      <PortalSidebar />
+      <div className="flex-1 flex flex-col min-w-0 lg:ml-64">
+        <PortalTopbar user={session.user} unreadCount={unreadCount} />
+        <main className="flex-1 px-6 lg:px-10 py-8 lg:py-12 max-w-[1400px] w-full">
+          {children}
+        </main>
+      </div>
+    </div>
   );
 }

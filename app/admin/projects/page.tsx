@@ -10,7 +10,12 @@ export const dynamic = "force-dynamic";
 async function getProjects() {
   try {
     await connectDB();
-    const projects = await Project.find().sort({ createdAt: -1 }).lean();
+    // Admin table only renders these fields — no need to pull media[] arrays
+    // for every project on the list page.
+    const projects = await Project.find()
+      .select("title slug category status featured isMainOnHome isPinned coverImage year client views createdAt")
+      .sort({ createdAt: -1 })
+      .lean();
     return projects.map((p) => ({
       _id: String(p._id),
       title: p.title,
@@ -18,6 +23,8 @@ async function getProjects() {
       category: p.category,
       status: p.status,
       featured: p.featured,
+      isMainOnHome: !!p.isMainOnHome,
+      isPinned: !!p.isPinned,
       coverImage: p.coverImage,
       year: p.year,
       client: p.client,

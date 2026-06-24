@@ -28,9 +28,11 @@ declare module "next-auth/jwt" {
  * Edge-safe auth config — NO Node-only imports.
  * The Credentials provider with DB lookup is added in lib/auth.ts (Node runtime).
  *
- * The `authorized` callback only checks login state. Role-based routing
- * (e.g., clients shouldn't see /admin) is handled in middleware.ts so we can
- * redirect to the right place per role.
+ * NOTE: the `authorized` callback was removed deliberately. Auth.js v5 beta-25
+ * used it to trigger automatic redirects to the signIn page, which caused
+ * production redirect loops (the /login page kept redirecting to itself).
+ * All routing decisions now live in middleware.ts, which uses getToken()
+ * directly and never delegates redirect behavior back to Auth.js.
  */
 export const authConfig = {
   session: { strategy: "jwt" },
@@ -53,13 +55,6 @@ export const authConfig = {
         session.user.clientId = token.clientId as string | undefined;
       }
       return session;
-    },
-    authorized({ auth, request }) {
-      const path = request.nextUrl.pathname;
-      const isProtected = path.startsWith("/admin") || path.startsWith("/portal");
-      // For protected paths, require login. Role-specific routing in middleware.
-      if (isProtected) return !!auth?.user;
-      return true;
     },
   },
 } satisfies NextAuthConfig;

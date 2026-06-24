@@ -4,8 +4,8 @@ import { useState, useMemo } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { Search, Eye, Pencil, Trash2, MoreVertical, Star } from "lucide-react";
-import { deleteProject, toggleProjectStatus } from "@/features/projects/actions";
+import { Search, Eye, Pencil, Trash2, MoreVertical, Star, Crown, Pin } from "lucide-react";
+import { deleteProject, toggleProjectStatus, setMainHomeProject, setPinnedProject } from "@/features/projects/actions";
 
 type AdminProject = {
   _id: string;
@@ -14,6 +14,8 @@ type AdminProject = {
   category: string;
   status: string;
   featured: boolean;
+  isMainOnHome: boolean;
+  isPinned: boolean;
   coverImage: string;
   year?: number;
   client?: string;
@@ -56,6 +58,26 @@ export function ProjectsTable({ projects }: { projects: AdminProject[] }) {
     const next = current === "published" ? "draft" : "published";
     setBusy(id);
     const res = await toggleProjectStatus(id, next as "draft" | "published");
+    setBusy(null);
+    if (res.ok) router.refresh();
+    else alert(res.error);
+  }
+
+  async function handleToggleMain(id: string, isCurrentlyMain: boolean) {
+    setBusy(id);
+    // If it's already main, clear it. Otherwise make it the new main (which
+    // server-side will also clear it on any other project).
+    const res = await setMainHomeProject(isCurrentlyMain ? null : id);
+    setBusy(null);
+    if (res.ok) router.refresh();
+    else alert(res.error);
+  }
+
+  async function handleTogglePin(id: string, isCurrentlyPinned: boolean) {
+    setBusy(id);
+    // Toggle pinning in the project's category. Server-side unpins any other
+    // project that was previously pinned in the same category.
+    const res = await setPinnedProject(id, !isCurrentlyPinned);
     setBusy(null);
     if (res.ok) router.refresh();
     else alert(res.error);
@@ -151,7 +173,21 @@ export function ProjectsTable({ projects }: { projects: AdminProject[] }) {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="font-medium truncate">{p.title}</p>
-                          {p.featured && <Star className="h-3.5 w-3.5 text-fire fill-fire flex-shrink-0" />}
+                          {p.isMainOnHome && (
+                            <Crown
+                              className="h-3.5 w-3.5 text-fire fill-fire flex-shrink-0"
+                              aria-label="Main project on home"
+                            />
+                          )}
+                          {p.isPinned && (
+                            <Pin
+                              className="h-3.5 w-3.5 text-fire fill-fire flex-shrink-0"
+                              aria-label={`Pinned in ${p.category}`}
+                            />
+                          )}
+                          {p.featured && !p.isMainOnHome && (
+                            <Star className="h-3.5 w-3.5 text-fire fill-fire flex-shrink-0" />
+                          )}
                         </div>
                         <p className="text-xs text-bone-400 truncate">/{p.slug}</p>
                       </div>
@@ -175,6 +211,38 @@ export function ProjectsTable({ projects }: { projects: AdminProject[] }) {
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center justify-end gap-1">
+                      <button
+                        onClick={() => handleToggleMain(p._id, p.isMainOnHome)}
+                        disabled={busy === p._id}
+                        title={
+                          p.isMainOnHome
+                            ? "Currently the main project on home — click to clear"
+                            : "Make this the main project on home"
+                        }
+                        className={`p-2 rounded-sm transition-colors ${
+                          p.isMainOnHome
+                            ? "text-fire bg-fire/10 hover:bg-fire/20"
+                            : "text-bone-300 hover:bg-ink-800 hover:text-fire"
+                        }`}
+                      >
+                        <Crown className={`h-4 w-4 ${p.isMainOnHome ? "fill-fire" : ""}`} />
+                      </button>
+                      <button
+                        onClick={() => handleTogglePin(p._id, p.isPinned)}
+                        disabled={busy === p._id}
+                        title={
+                          p.isPinned
+                            ? `Pinned in ${p.category} — click to unpin`
+                            : `Pin this project at the top of its category (${p.category})`
+                        }
+                        className={`p-2 rounded-sm transition-colors ${
+                          p.isPinned
+                            ? "text-fire bg-fire/10 hover:bg-fire/20"
+                            : "text-bone-300 hover:bg-ink-800 hover:text-fire"
+                        }`}
+                      >
+                        <Pin className={`h-4 w-4 ${p.isPinned ? "fill-fire" : ""}`} />
+                      </button>
                       <Link
                         href={`/projects/${p.slug}`}
                         target="_blank"

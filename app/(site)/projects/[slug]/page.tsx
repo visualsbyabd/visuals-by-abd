@@ -19,14 +19,33 @@ const categoryLabels: Record<string, string> = {
   "creative-direction": "Creative Direction",
 };
 
+// Initial number of media items rendered on the page. The rest load on demand via
+// the "Load more" button which calls loadMoreProjectMedia. Keep this aligned with
+// PAGE_SIZE inside MediaGallery so the first batch fills exactly one "page".
+const INITIAL_MEDIA_PAGE = 4;
+
 async function getProject(slug: string) {
   try {
     await connectDB();
-    const project = await Project.findOne({ slug, status: "published" }).lean();
+    // Fetch the project doc but slice the media array to only the first batch.
+    // This is the fix for the gateway-payload issue on large projects (200+ items).
+    const project = await Project.findOne(
+      { slug, status: "published" },
+      { media: { $slice: INITIAL_MEDIA_PAGE } }
+    ).lean();
     if (!project) return null;
+
+    // Total media count, used by the "Load more" button to know when to stop.
+    const [agg] = await Project.aggregate([
+      { $match: { _id: project._id } },
+      { $project: { count: { $size: { $ifNull: ["$media", []] } } } },
+    ]);
+    const totalMedia = (agg?.count as number) ?? 0;
+
     // Track view (fire-and-forget)
     Project.updateOne({ _id: project._id }, { $inc: { views: 1 } }).catch(() => {});
-    return project;
+
+    return { project, totalMedia };
   } catch {
     return null;
   }
@@ -35,10 +54,14 @@ async function getProject(slug: string) {
 async function getNextProject(currentId: string) {
   try {
     await connectDB();
+    // Only fetch what the "Next project" link actually renders — title + slug.
+    // Without this, MongoDB returns the full project document including the
+    // entire media array, which can be hundreds of items.
     const next = await Project.findOne({
       status: "published",
       _id: { $ne: currentId },
     })
+      .select("title slug")
       .sort({ order: 1, createdAt: -1 })
       .lean();
     return next;
@@ -53,8 +76,9 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }): Promise<Metadata> {
   const { slug } = await params;
-  const project = await getProject(slug);
-  if (!project) return { title: "Project not found" };
+  const result = await getProject(slug);
+  if (!result) return { title: "Project not found" };
+  const { project } = result;
   return {
     title: project.metaTitle || project.title,
     description: project.metaDescription || project.description,
@@ -66,17 +90,23 @@ export async function generateMetadata({
 
 export default async function ProjectPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const project = await getProject(slug);
-  if (!project) notFound();
+  const result = await getProject(slug);
+  if (!result) notFound();
+  const { project, totalMedia } = result;
 
   const next = await getNextProject(String(project._id));
 
-  // Build VideoObject JSON-LD for every video in the gallery — improves SEO and lets
-  // search engines/social embed previews show the right poster + duration.
+  // JSON-LD covers only the videos that are loaded on initial render. Including
+  // every video in a 200-item project would require fetching the entire media
+  // array from MongoDB on every page render, which kills the load time and
+  // defeats the pagination. Trade-off: schema.org coverage extends only to the
+  // first batch of videos (the ones above the fold). The project page itself
+  // is still indexed normally via its title, description, and OG image — the
+  // VideoObject entries are bonus structured data, not the primary SEO surface.
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "";
   const projectUrl = `${siteUrl}/projects/${project.slug}`;
   const videoLd = (project.media ?? [])
-    .filter((m) => m.type === "video")
+    .filter((v) => v.type === "video")
     .map((v) => ({
       "@context": "https://schema.org",
       "@type": "VideoObject",
@@ -240,6 +270,9 @@ export default async function ProjectPage({ params }: { params: Promise<{ slug: 
                         tags: m.tags ?? [],
                         featured: !!m.featured,
                         duration: m.duration,
+                        // This is the field that was missing — without it, vertical videos
+                        // rendered with the default horizontal aspect ratio.
+                        orientation: m.orientation,
                         order: m.order,
                       }))
                   : (project.gallery ?? []).map((src: string, i: number) => ({
@@ -258,6 +291,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ slug: 
                   <h2 className="display-md mb-12 text-balance">In detail.</h2>
                   <MediaGallery
                     items={mediaSource}
+                    total={totalMedia}
+                    projectId={String(project._id)}
                     projectTitle={project.title}
                     layout={project.mediaLayout ?? "mixed"}
                   />

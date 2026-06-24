@@ -88,3 +88,73 @@ export async function toggleProjectStatus(
     return { ok: false, error: e instanceof Error ? e.message : "Failed to update" };
   }
 }
+
+/**
+ * Set or clear the single "main on home" project.
+ *
+ * Pass an id to make that project the main one. Pass null to clear (no project
+ * is main). This is the only place that should mutate `isMainOnHome` — it
+ * enforces the single-truth constraint by unsetting every other project first.
+ *
+ * Setting a project as main also auto-flips its `featured` to true, since the
+ * main project is by definition shown in the featured-work section.
+ */
+export async function setMainHomeProject(
+  id: string | null
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await requireAdmin();
+    await connectDB();
+    // Clear it on everyone first — guarantees only one can have it.
+    await Project.updateMany({ isMainOnHome: true }, { $set: { isMainOnHome: false } });
+    if (id) {
+      const updated = await Project.findByIdAndUpdate(
+        id,
+        { isMainOnHome: true, featured: true },
+        { new: true }
+      );
+      if (!updated) return { ok: false, error: "Project not found" };
+    }
+    revalidatePath("/");
+    revalidatePath("/admin/projects");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Failed to update" };
+  }
+}
+
+/**
+ * Set or clear the pinned project for a category. At most one project per
+ * category can be pinned at a time — when you pin project X (in category Y),
+ * any previously-pinned project in category Y is unpinned automatically.
+ * Pass `makePinned: false` to simply unpin the project.
+ *
+ * The pinned project appears first in its category on the /projects page.
+ */
+export async function setPinnedProject(
+  id: string,
+  makePinned: boolean
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await requireAdmin();
+    await connectDB();
+    const project = await Project.findById(id).select("category").lean();
+    if (!project) return { ok: false, error: "Project not found" };
+
+    if (makePinned) {
+      // Clear pinning on every other project in the same category, then pin this one.
+      await Project.updateMany(
+        { category: project.category, isPinned: true, _id: { $ne: id } },
+        { $set: { isPinned: false } }
+      );
+      await Project.findByIdAndUpdate(id, { isPinned: true });
+    } else {
+      await Project.findByIdAndUpdate(id, { isPinned: false });
+    }
+    revalidatePath("/projects");
+    revalidatePath("/admin/projects");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Failed to update" };
+  }
+}

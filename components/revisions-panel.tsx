@@ -21,12 +21,15 @@ import {
   Wrench,
   Circle,
   XCircle,
+  Pencil,
+  Save,
 } from "lucide-react";
 import {
   createRevision,
   updateRevisionStatus,
   addRevisionComment,
   deleteRevision,
+  updateRevision,
 } from "@/features/revisions/actions";
 
 export type RevisionAttachment = {
@@ -432,6 +435,13 @@ function RevisionDetailModal({
   const [sending, setSending] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // Edit mode for the title/description/priority. Staff-only.
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState(revision.title);
+  const [editDescription, setEditDescription] = useState(revision.description);
+  const [editPriority, setEditPriority] = useState<Revision["priority"]>(revision.priority);
+  const [editError, setEditError] = useState<string | null>(null);
+
   const meta = STATUS_META[revision.status];
   const Icon = meta.icon;
 
@@ -460,6 +470,35 @@ function RevisionDetailModal({
     onDeleted();
   }
 
+  async function saveEdit() {
+    setEditError(null);
+    if (editTitle.trim().length < 2) {
+      setEditError("Title must be at least 2 characters");
+      return;
+    }
+    setBusy(true);
+    const res = await updateRevision(revision._id, {
+      title: editTitle.trim(),
+      description: editDescription.trim(),
+      priority: editPriority,
+    });
+    setBusy(false);
+    if (res.ok) {
+      setEditing(false);
+      onChanged();
+    } else {
+      setEditError(res.error);
+    }
+  }
+
+  function cancelEdit() {
+    setEditing(false);
+    setEditTitle(revision.title);
+    setEditDescription(revision.description);
+    setEditPriority(revision.priority);
+    setEditError(null);
+  }
+
   const staffActions: Revision["status"][] = ["in_review", "working", "resolved", "closed"];
   const clientCanReopen = !canManage && (revision.status === "resolved" || revision.status === "closed");
 
@@ -474,41 +513,124 @@ function RevisionDetailModal({
       >
         <div className="flex items-start justify-between gap-4 p-5 border-b border-ink-800">
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-2 flex-wrap">
-              <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 border rounded-full uppercase tracking-wider ${meta.color}`}>
-                <Icon className="h-3 w-3" strokeWidth={2} />
-                {meta.label}
-              </span>
-              <span className={`text-[10px] px-2 py-0.5 border rounded-full uppercase tracking-wider ${PRIORITY_STYLES[revision.priority]}`}>
-                {revision.priority} priority
-              </span>
-            </div>
-            <h3 className="font-display text-xl leading-tight">{revision.title}</h3>
-            <p className="text-xs text-bone-400 mt-2">
-              Logged by {revision.createdBy.name} · {new Date(revision.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-            </p>
+            {!editing ? (
+              <>
+                <div className="flex items-center gap-2 mb-2 flex-wrap">
+                  <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 border rounded-full uppercase tracking-wider ${meta.color}`}>
+                    <Icon className="h-3 w-3" strokeWidth={2} />
+                    {meta.label}
+                  </span>
+                  <span className={`text-[10px] px-2 py-0.5 border rounded-full uppercase tracking-wider ${PRIORITY_STYLES[revision.priority]}`}>
+                    {revision.priority} priority
+                  </span>
+                </div>
+                <h3 className="font-display text-xl leading-tight">{revision.title}</h3>
+                <p className="text-xs text-bone-400 mt-2">
+                  Logged by {revision.createdBy.name} · {new Date(revision.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                </p>
+              </>
+            ) : (
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-[10px] uppercase tracking-[0.2em] text-bone-300 mb-1">Title</label>
+                  <input
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    autoFocus
+                    className="w-full bg-transparent border-0 border-b border-ink-700 h-9 text-base focus:outline-none focus:border-fire"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] uppercase tracking-[0.2em] text-bone-300 mb-1">Priority</label>
+                  <div className="flex gap-1">
+                    {(["low", "medium", "high"] as const).map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => setEditPriority(p)}
+                        className={`px-3 py-1 text-[10px] uppercase tracking-wider border rounded-full transition-colors ${
+                          editPriority === p
+                            ? "border-fire text-fire bg-fire/10"
+                            : "border-ink-700 text-bone-300 hover:border-bone-300"
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {editError && (
+                  <div className="flex items-center gap-1.5 text-xs text-fire">
+                    <AlertCircle className="h-3 w-3" />
+                    {editError}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-1">
-            {canManage && (
-              <button
-                onClick={remove}
-                disabled={busy}
-                className="p-2 hover:bg-fire/10 rounded-sm text-bone-300 hover:text-fire transition-colors"
-                title="Delete"
-              >
-                <Trash2 className="h-4 w-4" />
+            {canManage && !editing && (
+              <>
+                <button
+                  onClick={() => setEditing(true)}
+                  disabled={busy}
+                  className="p-2 hover:bg-ink-900 rounded-sm text-bone-300 hover:text-fire transition-colors"
+                  title="Edit"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={remove}
+                  disabled={busy}
+                  className="p-2 hover:bg-fire/10 rounded-sm text-bone-300 hover:text-fire transition-colors"
+                  title="Delete"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </>
+            )}
+            {canManage && editing && (
+              <>
+                <button
+                  onClick={saveEdit}
+                  disabled={busy}
+                  className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 bg-fire hover:bg-fire-glow text-bone rounded-full transition-colors disabled:opacity-50"
+                  title="Save"
+                >
+                  {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                  Save
+                </button>
+                <button
+                  onClick={cancelEdit}
+                  disabled={busy}
+                  className="p-2 hover:bg-ink-900 rounded-sm text-bone-300 hover:text-bone transition-colors"
+                  title="Cancel"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </>
+            )}
+            {!editing && (
+              <button onClick={onClose} className="h-9 w-9 grid place-items-center hover:bg-ink-900 rounded-sm">
+                <X className="h-4 w-4" />
               </button>
             )}
-            <button onClick={onClose} className="h-9 w-9 grid place-items-center hover:bg-ink-900 rounded-sm">
-              <X className="h-4 w-4" />
-            </button>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-bone-300 mb-2">Description</p>
-            <p className="text-bone-300 whitespace-pre-wrap leading-relaxed">{revision.description}</p>
+            {!editing ? (
+              <p className="text-bone-300 whitespace-pre-wrap leading-relaxed">{revision.description}</p>
+            ) : (
+              <textarea
+                value={editDescription}
+                onChange={(e) => setEditDescription(e.target.value)}
+                rows={5}
+                className="w-full bg-ink-900 border border-ink-800 px-3 py-2 text-sm rounded-sm focus:outline-none focus:border-fire/40 resize-none leading-relaxed text-bone-300"
+              />
+            )}
           </div>
 
           {revision.attachments.length > 0 && (

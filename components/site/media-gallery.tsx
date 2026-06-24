@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Image from "next/image";
-import { X, ChevronLeft, ChevronRight, Play, Maximize2 } from "lucide-react";
+import { X, ChevronLeft, ChevronRight, Play, Maximize2, Plus, Loader2 } from "lucide-react";
 import { PremiumVideoPlayer } from "@/components/site/premium-video-player";
+import { loadMoreProjectMedia } from "@/features/projects/media-actions";
 
 export type ProjectMediaItem = {
   type: "image" | "video";
@@ -19,29 +20,134 @@ export type ProjectMediaItem = {
   order: number;
 };
 
-export type MediaLayout = "mixed" | "videos-grid";
+export type MediaLayout = "mixed" | "videos-grid" | "identities";
+
+const PAGE_SIZE = 4;
 
 export function MediaGallery({
-  items,
+  items: initialItems,
+  total,
+  projectId,
   projectTitle,
   layout = "mixed",
 }: {
   items: ProjectMediaItem[];
+  /** Total media items on this project; used by the "Load more" button to know when to stop. */
+  total: number;
+  /** Project id is needed by the server action that fetches more items. */
+  projectId: string;
   projectTitle: string;
   layout?: MediaLayout;
 }) {
-  // Branch: videos-grid mode renders a uniform tap-to-play grid of videos only
-  if (layout === "videos-grid") {
-    const videos = items.filter((m) => m.type === "video");
-    if (videos.length === 0) return null;
-    return <VideosGrid items={videos} projectTitle={projectTitle} />;
+  // Accumulator for items as the user clicks "Load more"
+  const [items, setItems] = useState<ProjectMediaItem[]>(initialItems);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // If the parent passes a different initial slice (e.g., navigation), reset.
+  useEffect(() => {
+    setItems(initialItems);
+  }, [initialItems, projectId]);
+
+  const hasMore = items.length < total;
+
+  async function loadMore() {
+    if (loading || !hasMore) return;
+    setLoading(true);
+    setLoadError(null);
+    const res = await loadMoreProjectMedia(projectId, items.length, PAGE_SIZE);
+    setLoading(false);
+    if (!res.ok) {
+      setLoadError(res.error);
+      return;
+    }
+    // Belt-and-suspenders client cap: even if the server somehow returns more
+    // than PAGE_SIZE items, we only ever append PAGE_SIZE per click. This
+    // protects the browser from rendering hundreds of components at once.
+    setItems((prev) => {
+      const seen = new Set(prev.map((p) => p.url));
+      const next = res.items.filter((it) => !seen.has(it.url)).slice(0, PAGE_SIZE);
+      return [...prev, ...next];
+    });
   }
 
-  // Mixed mode (default): featured hero + interleaved gallery
-  return <MixedGallery items={items} projectTitle={projectTitle} />;
+  const loadMoreSlot = hasMore ? (
+    <LoadMoreBar
+      visible={items.length}
+      total={total}
+      loading={loading}
+      onClick={loadMore}
+      error={loadError}
+    />
+  ) : null;
+
+  if (layout === "identities") {
+    const images = items.filter((m) => m.type === "image");
+    if (images.length === 0 && !hasMore) return null;
+    return (
+      <>
+        <IdentitiesStack items={images} projectTitle={projectTitle} />
+        {loadMoreSlot}
+      </>
+    );
+  }
+
+  if (layout === "videos-grid") {
+    const videos = items.filter((m) => m.type === "video");
+    if (videos.length === 0 && !hasMore) return null;
+    return (
+      <>
+        <VideosGrid items={videos} projectTitle={projectTitle} />
+        {loadMoreSlot}
+      </>
+    );
+  }
+
+  if (items.length === 0 && !hasMore) return null;
+
+  return (
+    <>
+      <MixedGallery items={items} projectTitle={projectTitle} />
+      {loadMoreSlot}
+    </>
+  );
 }
 
-/* ─────────── Mixed editorial layout (existing) ─────────── */
+/* ─────────── Load more bar ─────────── */
+
+function LoadMoreBar({
+  visible,
+  total,
+  loading,
+  onClick,
+  error,
+}: {
+  visible: number;
+  total: number;
+  loading: boolean;
+  onClick: () => void;
+  error: string | null;
+}) {
+  return (
+    <div className="mt-12 flex flex-col items-center gap-3">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={loading}
+        className="group inline-flex items-center gap-3 border border-ink-700 hover:border-fire hover:text-fire px-6 py-3 rounded-full transition-colors text-sm font-medium disabled:opacity-50"
+      >
+        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4 transition-transform group-hover:rotate-90" />}
+        {loading ? "Loading..." : "Load more"}
+      </button>
+      <p className="text-xs text-bone-400 font-mono">
+        {visible} of {total}
+      </p>
+      {error && <p className="text-xs text-fire">{error}</p>}
+    </div>
+  );
+}
+
+/* ─────────── Mixed editorial layout ─────────── */
 
 function MixedGallery({
   items,
@@ -50,6 +156,8 @@ function MixedGallery({
   items: ProjectMediaItem[];
   projectTitle: string;
 }) {
+  // Featured video can appear in any loaded batch. Find the first featured video
+  // in the currently-loaded set and promote it to the hero slot.
   const featuredVideo = items.find((m) => m.type === "video" && m.featured);
   const gridItems = featuredVideo ? items.filter((m) => m.url !== featuredVideo.url) : items;
 
@@ -83,11 +191,8 @@ function MixedGallery({
     };
   }, [lightboxIdx, close, next, prev, gridItems]);
 
-  if (items.length === 0) return null;
-
   return (
     <>
-      {/* Featured video — cinematic hero above the grid */}
       {featuredVideo && (
         <div className="mb-12 space-y-4">
           <FeaturedVideo media={featuredVideo} projectTitle={projectTitle} />
@@ -109,15 +214,10 @@ function MixedGallery({
         </div>
       )}
 
-      {/* Editorial gallery */}
       <div className="grid gap-6">
         {gridItems.map((m, i) => {
           const isVerticalVideo = m.type === "video" && m.orientation === "vertical";
-          // Vertical video — constrained portrait card, centered, doesn't span the row
-          // Horizontal media — alternating wide/medium rhythm
-          const containerClass = isVerticalVideo
-            ? "max-w-sm mx-auto"
-            : "";
+          const containerClass = isVerticalVideo ? "max-w-sm mx-auto" : "";
           const aspectClass = isVerticalVideo
             ? "aspect-[9/16]"
             : i % 3 === 0
@@ -181,7 +281,7 @@ function MixedGallery({
   );
 }
 
-/* ─────────── Videos-only grid layout (new) ─────────── */
+/* ─────────── Videos-only grid layout ─────────── */
 
 function VideosGrid({
   items,
@@ -220,8 +320,6 @@ function VideosGrid({
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
         {items.map((m, i) => {
           const isVertical = m.orientation === "vertical";
-          // Each card respects the video's orientation — verticals are tall,
-          // horizontals are wide. CSS grid handles the asymmetry naturally.
           const aspectClass = isVertical ? "aspect-[9/16]" : "aspect-video";
           return (
             <button
@@ -232,14 +330,12 @@ function VideosGrid({
             >
               <LazyVideoThumb media={m} alt={m.alt ?? m.title ?? `${projectTitle} — video ${i + 1}`} />
 
-              {/* Duration pill (top-right) */}
               {m.duration && (
                 <span className="absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded-full bg-ink/80 backdrop-blur border border-ink-700 text-bone font-mono">
                   {formatTime(m.duration)}
                 </span>
               )}
 
-              {/* Title strip (bottom) */}
               {m.title && (
                 <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-ink/95 to-transparent p-3 text-left">
                   <p className="text-bone text-xs font-medium line-clamp-1">{m.title}</p>
@@ -264,6 +360,85 @@ function VideosGrid({
   );
 }
 
+/* ─────────── Identities layout — images only, vertically stacked, no spacing ─────────── */
+
+function IdentitiesStack({
+  items,
+  projectTitle,
+}: {
+  items: ProjectMediaItem[];
+  projectTitle: string;
+}) {
+  const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+
+  const close = useCallback(() => setLightboxIdx(null), []);
+  const next = useCallback(
+    () => setLightboxIdx((idx) => (idx === null ? null : (idx + 1) % items.length)),
+    [items.length]
+  );
+  const prev = useCallback(
+    () => setLightboxIdx((idx) => (idx === null ? null : (idx - 1 + items.length) % items.length)),
+    [items.length]
+  );
+
+  useEffect(() => {
+    if (lightboxIdx === null) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") close();
+      if (e.key === "ArrowRight") next();
+      if (e.key === "ArrowLeft") prev();
+    }
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [lightboxIdx, close, next, prev]);
+
+  // No gap, no dividers, no captions — pure visual flow.
+  // Each item is 16:9 regardless of source aspect. `object-cover` keeps the
+  // image filling the frame while honoring the slot ratio.
+  return (
+    <>
+      <div className="flex flex-col">
+        {items.map((m, i) => (
+          <button
+            key={m.url}
+            onClick={() => setLightboxIdx(i)}
+            className="relative w-full aspect-video overflow-hidden bg-ink-900 block group"
+            aria-label={`View image: ${m.alt ?? `${projectTitle} — ${i + 1}`}`}
+          >
+            <Image
+              src={m.url}
+              alt={m.alt ?? `${projectTitle} — ${i + 1}`}
+              fill
+              className="object-cover"
+              sizes="(min-width: 1024px) 75vw, 100vw"
+              priority={i < 2}
+            />
+            {/* Subtle hover-only affordance — nothing visible until intent */}
+            <span className="absolute top-4 right-4 h-9 w-9 rounded-full bg-ink/60 backdrop-blur border border-bone/20 grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity">
+              <Maximize2 className="h-3.5 w-3.5 text-bone" strokeWidth={2} />
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {lightboxIdx !== null && (
+        <Lightbox
+          items={items}
+          index={lightboxIdx}
+          onClose={close}
+          onNext={next}
+          onPrev={prev}
+          projectTitle={projectTitle}
+        />
+      )}
+    </>
+  );
+}
+
 /* ─────────── Featured video ─────────── */
 
 function FeaturedVideo({ media, projectTitle }: { media: ProjectMediaItem; projectTitle: string }) {
@@ -271,9 +446,7 @@ function FeaturedVideo({ media, projectTitle }: { media: ProjectMediaItem; proje
   return (
     <div
       className={`relative rounded-sm overflow-hidden bg-ink-900 border border-ink-800 ${
-        isVertical
-          ? "aspect-[9/16] max-w-md mx-auto"
-          : "aspect-video"
+        isVertical ? "aspect-[9/16] max-w-md mx-auto" : "aspect-video"
       }`}
     >
       <PremiumVideoPlayer

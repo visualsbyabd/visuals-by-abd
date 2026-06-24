@@ -1,5 +1,6 @@
 "use server";
 
+import mongoose from "mongoose";
 import { revalidatePath } from "next/cache";
 import { connectDB } from "@/lib/mongodb";
 import { Project } from "@/models/Project";
@@ -194,7 +195,7 @@ const VIDEO_EXTENSIONS = /\.(mp4|mov|webm|m4v|avi)(\?|#|$)/i;
 
 export async function setProjectMediaLayout(
   projectId: string,
-  layout: "mixed" | "videos-grid"
+  layout: "mixed" | "videos-grid" | "identities"
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     await requireStaff();
@@ -206,6 +207,94 @@ export async function setProjectMediaLayout(
     revalidatePath(`/admin/projects/${projectId}`);
     revalidatePath(`/projects/${project.slug}`);
     return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Failed" };
+  }
+}
+
+export type LoadedMedia = {
+  type: "image" | "video";
+  url: string;
+  thumbnail?: string;
+  alt?: string;
+  title?: string;
+  description?: string;
+  tags: string[];
+  featured: boolean;
+  duration?: number;
+  orientation?: "horizontal" | "vertical";
+  order: number;
+};
+
+/**
+ * Load a slice of a project's media array — backs the "Load more" button.
+ *
+ * Uses an aggregation pipeline rather than findById+projection because Mongoose's
+ * chained .select() silently overrides the projection passed to findById,
+ * which means the $slice operator was being dropped — the full media array was
+ * coming over the wire on every "Load more" click. That's what caused the
+ * 502/Bad Gateway on large projects.
+ *
+ * Aggregation pipeline is the canonical, projection-quirk-proof way to do this:
+ * - $slice in $project reliably trims the array at the DB layer
+ * - $size returns the total count in the same query (one round trip, not two)
+ * - The returned `.media` array is guaranteed to contain at most `limit` items
+ */
+export async function loadMoreProjectMedia(
+  projectId: string,
+  skip: number,
+  limit: number
+): Promise<
+  | { ok: true; items: LoadedMedia[]; total: number }
+  | { ok: false; error: string }
+> {
+  try {
+    if (!Number.isFinite(skip) || skip < 0) return { ok: false, error: "Invalid skip" };
+    if (!Number.isFinite(limit) || limit <= 0 || limit > 50) {
+      return { ok: false, error: "Invalid limit" };
+    }
+    if (!mongoose.isValidObjectId(projectId)) {
+      return { ok: false, error: "Invalid project id" };
+    }
+    await connectDB();
+
+    const [result] = await Project.aggregate<{
+      _id: mongoose.Types.ObjectId;
+      media: Record<string, unknown>[];
+      total: number;
+    }>([
+      { $match: { _id: new mongoose.Types.ObjectId(projectId) } },
+      {
+        $project: {
+          _id: 1,
+          media: { $slice: [{ $ifNull: ["$media", []] }, skip, limit] },
+          total: { $size: { $ifNull: ["$media", []] } },
+        },
+      },
+    ]);
+
+    if (!result) return { ok: false, error: "Project not found" };
+
+    // Defensive cap. Even if the projection were somehow bypassed by a future
+    // edit, we never return more items than the caller requested.
+    const items: LoadedMedia[] = (result.media ?? [])
+      .slice(0, limit)
+      .map((m) => ({
+        type: m.type as "image" | "video",
+        url: m.url as string,
+        thumbnail: m.thumbnail as string | undefined,
+        alt: m.alt as string | undefined,
+        title: m.title as string | undefined,
+        description: m.description as string | undefined,
+        tags: (m.tags as string[]) ?? [],
+        featured: !!m.featured,
+        duration: m.duration as number | undefined,
+        orientation: m.orientation as "horizontal" | "vertical" | undefined,
+        order: (m.order as number) ?? 0,
+      }))
+      .sort((a, b) => a.order - b.order);
+
+    return { ok: true, items, total: result.total ?? 0 };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Failed" };
   }

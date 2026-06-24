@@ -40,7 +40,7 @@ export interface IProject extends Document {
     uploadedAt: Date;
   }[];
   // NEW: layout mode for the public case study gallery
-  mediaLayout: "mixed" | "videos-grid";
+  mediaLayout: "mixed" | "videos-grid" | "identities";
   // NEW: conversation-level state (Messages Center)
   messagesArchivedAt?: Date;
   messagesInternalNotes?: string;
@@ -52,6 +52,14 @@ export interface IProject extends Document {
   outcome?: string;
   tags: string[];
   featured: boolean;
+  // The single project shown in the largest hero slot on the home page.
+  // Enforced single-truth via setMainHomeProject — at most one project should
+  // have this set to true. Setting one auto-clears it on all others.
+  isMainOnHome: boolean;
+  // Per-category pinning for the /projects index page. At most one project per
+  // category should be pinned. Pinned projects render first in their category
+  // (and first overall on the unfiltered /projects view).
+  isPinned: boolean;
   status: "draft" | "published" | "archived";
   year?: number;
   metaTitle?: string;
@@ -98,7 +106,7 @@ const ProjectSchema = new Schema<IProject>(
     },
     mediaLayout: {
       type: String,
-      enum: ["mixed", "videos-grid"],
+      enum: ["mixed", "videos-grid", "identities"],
       default: "mixed",
     },
     client: String,
@@ -115,6 +123,8 @@ const ProjectSchema = new Schema<IProject>(
     outcome: String,
     tags: { type: [String], default: [], index: true },
     featured: { type: Boolean, default: false, index: true },
+    isMainOnHome: { type: Boolean, default: false, index: true },
+    isPinned: { type: Boolean, default: false, index: true },
     status: {
       type: String,
       enum: ["draft", "published", "archived"],

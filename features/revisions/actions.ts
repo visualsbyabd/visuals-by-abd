@@ -98,6 +98,43 @@ export async function createRevision(
   }
 }
 
+/**
+ * Edit a revision's title, description, and/or priority. Staff-only — clients
+ * cannot edit the content of a revision once it's been opened (status changes
+ * are the only thing they control, via updateRevisionStatus).
+ */
+export async function updateRevision(
+  id: string,
+  data: { title?: string; description?: string; priority?: "low" | "medium" | "high" }
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await requireStaff();
+    await connectDB();
+    const revision = await Revision.findById(id);
+    if (!revision) return { ok: false, error: "Not found" };
+
+    if (data.title !== undefined) {
+      const trimmed = data.title.trim();
+      if (trimmed.length < 2) return { ok: false, error: "Title must be at least 2 characters" };
+      revision.title = trimmed;
+    }
+    if (data.description !== undefined) {
+      revision.description = data.description.trim();
+    }
+    if (data.priority !== undefined) {
+      revision.priority = data.priority;
+    }
+    await revision.save();
+
+    revalidatePath(`/admin/projects/${revision.project}`);
+    revalidatePath(`/portal/projects/${revision.project}`);
+    revalidatePath("/admin/revisions");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Failed to update" };
+  }
+}
+
 export async function updateRevisionStatus(
   id: string,
   status: RevisionStatus

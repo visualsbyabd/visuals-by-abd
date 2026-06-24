@@ -1,239 +1,201 @@
-import Link from "next/link";
 import { connectDB } from "@/lib/mongodb";
+import { Invoice } from "@/models/Invoice";
 import { Project } from "@/models/Project";
-import { Media } from "@/models/Media";
-import { Testimonial } from "@/models/Testimonial";
-import {
-  FolderKanban,
-  Image as ImageIcon,
-  MessageSquareQuote,
-  Eye,
-  ArrowUpRight,
-  Plus,
-} from "lucide-react";
-import { formatBytes } from "@/lib/utils";
+import { Task } from "@/models/Task";
+import { Deliverable } from "@/models/Deliverable";
+import { Client } from "@/models/Client";
+import { AnalyticsCharts } from "@/components/admin/analytics-charts";
+import { DollarSign, FolderKanban, Users, FileCheck2, Receipt, TrendingUp } from "lucide-react";
 
-async function getStats() {
-  try {
-    await connectDB();
-    const [
-      totalProjects,
-      publishedProjects,
-      draftProjects,
-      mediaCount,
-      mediaSize,
-      testimonialCount,
-      recentProjects,
-      totalViews,
-    ] = await Promise.all([
-      Project.countDocuments({}),
-      Project.countDocuments({ status: "published" }),
-      Project.countDocuments({ status: "draft" }),
-      Media.countDocuments({}),
-      Media.aggregate([{ $group: { _id: null, total: { $sum: "$size" } } }]),
-      Testimonial.countDocuments({}),
-      Project.find().sort({ createdAt: -1 }).limit(5).lean(),
-      Project.aggregate([{ $group: { _id: null, total: { $sum: "$views" } } }]),
-    ]);
+export const dynamic = "force-dynamic";
 
-    return {
-      totalProjects,
-      publishedProjects,
-      draftProjects,
-      mediaCount,
-      mediaSize: mediaSize[0]?.total ?? 0,
-      testimonialCount,
-      totalViews: totalViews[0]?.total ?? 0,
-      recentProjects: recentProjects.map((p) => ({
-        _id: String(p._id),
-        title: p.title,
-        slug: p.slug,
-        status: p.status,
-        category: p.category,
-        createdAt: p.createdAt,
-      })),
-    };
-  } catch {
-    return {
-      totalProjects: 0,
-      publishedProjects: 0,
-      draftProjects: 0,
-      mediaCount: 0,
-      mediaSize: 0,
-      testimonialCount: 0,
-      totalViews: 0,
-      recentProjects: [],
-    };
+async function getAnalytics() {
+  await connectDB();
+
+  const [invoices, projects, tasks, deliverables, clients] = await Promise.all([
+    Invoice.find().select("total currency status issueDate paidDate client createdAt").lean(),
+    Project.find().select("title status progress clientRef createdAt updatedAt").lean(),
+    Task.find().select("status completedAt createdAt").lean(),
+    Deliverable.find().select("status createdAt reviewedAt version").lean(),
+    Client.find().select("_id name company status").lean(),
+  ]);
+
+  // ─── Revenue over time (last 12 months) ───
+  const now = new Date();
+  const months: { label: string; key: string; revenue: number; outstanding: number }[] = [];
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    months.push({
+      label: d.toLocaleString(undefined, { month: "short" }),
+      key,
+      revenue: 0,
+      outstanding: 0,
+    });
   }
+  for (const inv of invoices) {
+    if (inv.status === "paid" && inv.paidDate) {
+      const d = new Date(inv.paidDate);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const bucket = months.find((m) => m.key === key);
+      if (bucket) bucket.revenue += inv.total;
+    } else if ((inv.status === "sent" || inv.status === "overdue") && inv.issueDate) {
+      const d = new Date(inv.issueDate);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const bucket = months.find((m) => m.key === key);
+      if (bucket) bucket.outstanding += inv.total;
+    }
+  }
+
+  // ─── Project status distribution ───
+  const projectStatusMap = new Map<string, number>();
+  for (const p of projects) {
+    projectStatusMap.set(p.status, (projectStatusMap.get(p.status) ?? 0) + 1);
+  }
+  const projectStatus = Array.from(projectStatusMap.entries()).map(([name, value]) => ({ name, value }));
+
+  // ─── Task velocity (last 8 weeks) ───
+  const weeks: { label: string; completed: number; created: number }[] = [];
+  for (let i = 7; i >= 0; i--) {
+    const start = new Date(now);
+    start.setDate(now.getDate() - i * 7 - 6);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 7);
+    const label = `${start.toLocaleString(undefined, { month: "short", day: "numeric" })}`;
+    let completed = 0;
+    let created = 0;
+    for (const t of tasks) {
+      const created_at = new Date(t.createdAt);
+      if (created_at >= start && created_at < end) created++;
+      if (t.completedAt) {
+        const c = new Date(t.completedAt);
+        if (c >= start && c < end) completed++;
+      }
+    }
+    weeks.push({ label, completed, created });
+  }
+
+  // ─── Deliverable approval times (in hours) ───
+  const approvalTimes: number[] = [];
+  for (const d of deliverables) {
+    if (d.status === "approved" && d.reviewedAt && d.createdAt) {
+      const hours = (new Date(d.reviewedAt).getTime() - new Date(d.createdAt).getTime()) / 36e5;
+      if (hours >= 0 && hours < 24 * 90) approvalTimes.push(hours);
+    }
+  }
+  const avgApprovalHours =
+    approvalTimes.length > 0 ? approvalTimes.reduce((s, h) => s + h, 0) / approvalTimes.length : 0;
+
+  // ─── Client health: revision rate + last activity proxy ───
+  const clientHealth = clients
+    .filter((c) => c.status === "active")
+    .map((c) => {
+      const clientInvoices = invoices.filter((i) => String(i.client) === String(c._id));
+      const paidOnTime = clientInvoices.filter((i) => i.status === "paid").length;
+      const outstanding = clientInvoices.filter((i) => i.status === "sent" || i.status === "overdue").length;
+      const totalPaid = clientInvoices
+        .filter((i) => i.status === "paid")
+        .reduce((s, i) => s + i.total, 0);
+      const clientProjects = projects.filter((p) => String(p.clientRef) === String(c._id));
+      const score =
+        clientInvoices.length === 0
+          ? 60
+          : Math.max(
+              0,
+              Math.min(100, Math.round((paidOnTime / Math.max(1, clientInvoices.length)) * 100 - outstanding * 5))
+            );
+      return {
+        _id: String(c._id),
+        name: c.name,
+        company: c.company,
+        score,
+        revenue: totalPaid,
+        projects: clientProjects.length,
+        outstanding,
+      };
+    })
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 10);
+
+  // ─── Totals ───
+  const totalRevenue = invoices.filter((i) => i.status === "paid").reduce((s, i) => s + i.total, 0);
+  const outstanding = invoices
+    .filter((i) => i.status === "sent" || i.status === "overdue")
+    .reduce((s, i) => s + i.total, 0);
+  const activeProjects = projects.filter((p) => p.status === "published" || p.status === "draft").length;
+  const pendingReview = deliverables.filter((d) => d.status === "in_review").length;
+  const taskCompletionPct =
+    tasks.length > 0
+      ? Math.round((tasks.filter((t) => t.status === "completed" || t.status === "approved").length / tasks.length) * 100)
+      : 0;
+
+  return {
+    months,
+    projectStatus,
+    weeks,
+    avgApprovalHours: Math.round(avgApprovalHours * 10) / 10,
+    clientHealth,
+    totals: {
+      revenue: totalRevenue,
+      outstanding,
+      activeProjects,
+      activeClients: clients.filter((c) => c.status === "active").length,
+      pendingReview,
+      taskCompletionPct,
+    },
+  };
 }
 
-const statusColors: Record<string, string> = {
-  published: "text-fire border-fire/40 bg-fire/5",
-  draft: "text-bone-300 border-ink-700 bg-ink-900",
-  archived: "text-bone-400 border-ink-700 bg-ink-900",
-};
-
-export default async function AdminDashboardPage() {
-  const stats = await getStats();
+export default async function AnalyticsPage() {
+  const data = await getAnalytics();
 
   return (
-    <div>
-      {/* Heading */}
-      <div className="flex items-end justify-between gap-6 flex-wrap mb-12">
-        <div>
-          <p className="eyebrow mb-3">— Dashboard</p>
-          <h1 className="display-md text-balance">
-            Welcome back, <span className="italic font-light text-fire">creator</span>.
-          </h1>
-        </div>
-        <Link
-          href="/admin/projects/new"
-          className="inline-flex items-center gap-2 bg-fire hover:bg-fire-glow text-bone px-6 py-3 rounded-full transition-all text-sm font-medium shadow-[0_0_40px_-10px_rgba(214,40,40,0.6)]"
-        >
-          <Plus className="h-4 w-4" />
-          New Project
-        </Link>
+    <div className="space-y-10">
+      <div>
+        <p className="eyebrow mb-3">— Studio</p>
+        <h1 className="display-md text-balance">Analytics</h1>
+        <p className="text-bone-300 mt-2">Where revenue, projects, and approvals are headed.</p>
       </div>
 
-      {/* Stat cards */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
-        <StatCard
-          label="Total Projects"
-          value={stats.totalProjects.toString()}
-          sub={`${stats.publishedProjects} published`}
-          icon={FolderKanban}
-          accent
-        />
-        <StatCard
-          label="Total Views"
-          value={stats.totalViews.toLocaleString()}
-          sub="all time"
-          icon={Eye}
-        />
-        <StatCard
-          label="Media Files"
-          value={stats.mediaCount.toString()}
-          sub={formatBytes(stats.mediaSize)}
-          icon={ImageIcon}
-        />
-        <StatCard
-          label="Testimonials"
-          value={stats.testimonialCount.toString()}
-          sub="active"
-          icon={MessageSquareQuote}
-        />
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+        <Stat icon={DollarSign} label="Revenue" value={`$${data.totals.revenue.toLocaleString()}`} accent />
+        <Stat icon={Receipt} label="Outstanding" value={`$${data.totals.outstanding.toLocaleString()}`} accent={data.totals.outstanding > 0} />
+        <Stat icon={FolderKanban} label="Active projects" value={data.totals.activeProjects} />
+        <Stat icon={Users} label="Active clients" value={data.totals.activeClients} />
+        <Stat icon={FileCheck2} label="Pending review" value={data.totals.pendingReview} />
+        <Stat icon={TrendingUp} label="Tasks done" value={`${data.totals.taskCompletionPct}%`} />
       </div>
 
-      {/* Recent activity */}
-      <div className="grid lg:grid-cols-3 gap-6">
-        <section className="lg:col-span-2 border border-ink-800 rounded-sm">
-          <header className="flex items-center justify-between p-6 border-b border-ink-800">
-            <h2 className="font-display text-lg font-medium">Recent Projects</h2>
-            <Link
-              href="/admin/projects"
-              className="text-sm text-bone-300 hover:text-fire transition-colors inline-flex items-center gap-1 group"
-            >
-              View all
-              <ArrowUpRight className="h-3.5 w-3.5 transition-transform group-hover:rotate-45" />
-            </Link>
-          </header>
-          {stats.recentProjects.length === 0 ? (
-            <div className="p-12 text-center">
-              <p className="text-bone-300 mb-6">No projects yet. Create your first.</p>
-              <Link
-                href="/admin/projects/new"
-                className="inline-flex items-center gap-2 border border-ink-700 hover:border-fire hover:text-fire px-5 py-2.5 rounded-full text-sm transition-all"
-              >
-                <Plus className="h-4 w-4" />
-                Create Project
-              </Link>
-            </div>
-          ) : (
-            <ul className="divide-y divide-ink-800">
-              {stats.recentProjects.map((p) => (
-                <li key={p._id}>
-                  <Link
-                    href={`/admin/projects/${p._id}`}
-                    className="flex items-center justify-between gap-4 p-6 hover:bg-ink-900 transition-colors group"
-                  >
-                    <div className="min-w-0">
-                      <p className="font-medium truncate group-hover:text-fire transition-colors">
-                        {p.title}
-                      </p>
-                      <p className="text-xs text-bone-400 uppercase tracking-wider mt-1">
-                        {p.category.replace("-", " ")}
-                      </p>
-                    </div>
-                    <span
-                      className={`text-xs px-3 py-1 border rounded-full uppercase tracking-wider flex-shrink-0 ${
-                        statusColors[p.status]
-                      }`}
-                    >
-                      {p.status}
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        {/* Quick actions */}
-        <section className="border border-ink-800 rounded-sm p-6">
-          <h2 className="font-display text-lg font-medium mb-6">Quick Actions</h2>
-          <div className="space-y-3">
-            {[
-              { href: "/admin/projects/new", label: "Add new project", icon: Plus },
-              { href: "/admin/media", label: "Upload media", icon: ImageIcon },
-              { href: "/admin/testimonials", label: "Manage testimonials", icon: MessageSquareQuote },
-              { href: "/admin/settings", label: "Update site settings", icon: ArrowUpRight },
-            ].map(({ href, label, icon: Icon }) => (
-              <Link
-                key={href}
-                href={href}
-                className="flex items-center gap-3 px-4 py-3 border border-ink-800 hover:border-fire/40 hover:bg-ink-900 rounded-sm transition-all group"
-              >
-                <Icon className="h-4 w-4 text-fire" />
-                <span className="text-sm">{label}</span>
-                <ArrowUpRight className="h-3.5 w-3.5 ml-auto opacity-0 group-hover:opacity-100 transition-opacity" />
-              </Link>
-            ))}
-          </div>
-        </section>
-      </div>
+      <AnalyticsCharts
+        months={data.months}
+        projectStatus={data.projectStatus}
+        weeks={data.weeks}
+        avgApprovalHours={data.avgApprovalHours}
+        clientHealth={data.clientHealth}
+      />
     </div>
   );
 }
 
-function StatCard({
+function Stat({
+  icon: Icon,
   label,
   value,
-  sub,
-  icon: Icon,
   accent,
 }: {
-  label: string;
-  value: string;
-  sub: string;
   icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
+  label: string;
+  value: string | number;
   accent?: boolean;
 }) {
   return (
-    <div className={`border rounded-sm p-6 relative overflow-hidden ${accent ? "border-fire/40 bg-fire/5" : "border-ink-800"}`}>
-      {accent && (
-        <div
-          className="absolute -top-12 -right-12 h-32 w-32 rounded-full opacity-20"
-          style={{ background: "radial-gradient(circle, #D62828 0%, transparent 70%)" }}
-        />
-      )}
-      <div className="relative">
-        <div className="flex items-center justify-between mb-6">
-          <span className="text-xs uppercase tracking-[0.2em] text-bone-300">{label}</span>
-          <Icon className="h-4 w-4 text-fire" strokeWidth={1.5} />
-        </div>
-        <p className="font-display text-4xl font-medium tracking-tight mb-1">{value}</p>
-        <p className="text-xs text-bone-400">{sub}</p>
+    <div className={`border rounded-sm p-5 ${accent ? "border-fire/40 bg-fire/5" : "border-ink-800"}`}>
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs uppercase tracking-[0.2em] text-bone-300">{label}</span>
+        <Icon className="h-4 w-4 text-fire" strokeWidth={1.5} />
       </div>
+      <p className="font-display text-2xl font-medium">{value}</p>
     </div>
   );
 }

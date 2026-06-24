@@ -19,6 +19,7 @@ import {
   Check,
   LayoutGrid,
   Rows3,
+  AlignVerticalSpaceAround,
 } from "lucide-react";
 import {
   addProjectMedia,
@@ -26,6 +27,7 @@ import {
   reorderProjectMedia,
   updateProjectMedia,
   setProjectMediaLayout,
+  loadMoreProjectMedia,
   type MediaInput,
 } from "@/features/projects/media-actions";
 import type { ProjectMediaItem } from "@/components/site/media-gallery";
@@ -37,15 +39,19 @@ type WorkingMediaInput = MediaInput & {
   fileName?: string;
 };
 
-export type MediaLayout = "mixed" | "videos-grid";
+export type MediaLayout = "mixed" | "videos-grid" | "identities";
+
+const PAGE_SIZE = 5;
 
 export function ProjectMediaPanel({
   projectId,
   media,
+  totalMedia,
   mediaLayout = "mixed",
 }: {
   projectId: string;
   media: ProjectMediaItem[];
+  totalMedia: number;
   mediaLayout?: MediaLayout;
 }) {
   const router = useRouter();
@@ -55,6 +61,8 @@ export function ProjectMediaPanel({
   const [showUploader, setShowUploader] = useState(false);
   const [editing, setEditing] = useState<ProjectMediaItem | null>(null);
   const [draggedUrl, setDraggedUrl] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Keep local state in sync if the server data changes (e.g., after router.refresh)
   useEffect(() => setItems(media), [media]);
@@ -68,10 +76,32 @@ export function ProjectMediaPanel({
     router.refresh();
   }
 
+  const hasMore = items.length < totalMedia;
+
+  async function loadMore() {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    setLoadError(null);
+    const res = await loadMoreProjectMedia(projectId, items.length, PAGE_SIZE);
+    setLoadingMore(false);
+    if (!res.ok) {
+      setLoadError(res.error);
+      return;
+    }
+    setItems((prev) => {
+      const seen = new Set(prev.map((p) => p.url));
+      const next = res.items.filter((it) => !seen.has(it.url)).slice(0, PAGE_SIZE);
+      return [...prev, ...next];
+    });
+  }
+
   async function remove(url: string) {
     if (!confirm("Remove this media from the gallery?")) return;
+    // Optimistic removal — keeps the user's "Load more" position intact.
+    // If the server call fails, the next router.refresh() will resync state.
+    setItems((prev) => prev.filter((m) => m.url !== url));
     const res = await removeProjectMedia(projectId, url);
-    if (res.ok) router.refresh();
+    if (!res.ok) router.refresh();
   }
 
   async function onDrop(targetUrl: string) {
@@ -87,13 +117,14 @@ export function ProjectMediaPanel({
     next.splice(toIdx, 0, moved);
     setItems(next);
     setDraggedUrl(null);
+    // Reorder is optimistic. The server stores the new order; no refresh needed.
     await reorderProjectMedia(projectId, next.map((m) => m.url));
-    router.refresh();
   }
 
   async function setFeatured(url: string) {
+    // Optimistic featured flip — only one item is featured at a time.
+    setItems((prev) => prev.map((m) => ({ ...m, featured: m.url === url })));
     await updateProjectMedia(projectId, url, { featured: true });
-    router.refresh();
   }
 
   return (
@@ -117,7 +148,7 @@ export function ProjectMediaPanel({
       {/* Layout-mode sub-bar */}
       <div className="flex items-center justify-between gap-3 px-6 py-3 border-b border-ink-800 bg-ink-950/50 flex-wrap">
         <p className="text-xs uppercase tracking-[0.2em] text-bone-300">Public layout</p>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <LayoutChoice
             active={layout === "mixed"}
             onClick={() => changeLayout("mixed")}
@@ -131,6 +162,13 @@ export function ProjectMediaPanel({
             icon={LayoutGrid}
             label="Videos-only grid"
             description="Uniform thumbnail grid · tap to play · perfect for reels"
+          />
+          <LayoutChoice
+            active={layout === "identities"}
+            onClick={() => changeLayout("identities")}
+            icon={AlignVerticalSpaceAround}
+            label="Identities"
+            description="Images-only · 16:9 stacked · no dividers"
           />
           {layoutSaving && <Loader2 className="h-3.5 w-3.5 text-fire animate-spin ml-1" />}
         </div>
@@ -230,6 +268,24 @@ export function ProjectMediaPanel({
               </div>
             </article>
           ))}
+        </div>
+      )}
+
+      {hasMore && (
+        <div className="flex flex-col items-center gap-2 px-6 pb-6">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="group inline-flex items-center gap-2 border border-ink-700 hover:border-fire hover:text-fire px-5 py-2 rounded-full transition-colors text-sm disabled:opacity-50"
+          >
+            {loadingMore ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 transition-transform group-hover:rotate-90" />}
+            {loadingMore ? "Loading..." : "Load more"}
+          </button>
+          <p className="text-xs text-bone-400 font-mono">
+            {items.length} of {totalMedia}
+          </p>
+          {loadError && <p className="text-xs text-fire">{loadError}</p>}
         </div>
       )}
 

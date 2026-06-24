@@ -1,6 +1,6 @@
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowUpRight } from "lucide-react";
+import { ArrowUpRight, Pin } from "lucide-react";
 import { connectDB } from "@/lib/mongodb";
 import { Project } from "@/models/Project";
 import type { Metadata } from "next";
@@ -30,7 +30,16 @@ async function getProjects(category?: string) {
     await connectDB();
     const query: Record<string, unknown> = { status: "published" };
     if (category && category !== "all") query.category = category;
-    const projects = await Project.find(query).sort({ order: 1, createdAt: -1 }).lean();
+    // Only fetch the fields the index card grid renders. Without this projection
+    // MongoDB returns each project's entire media array — for a portfolio with
+    // many large projects, that's hundreds of MB transferred just to render
+    // thumbnail cards. The cover image is a single URL string, not the media[].
+    const projects = await Project.find(query)
+      .select("title slug category coverImage year client description isPinned")
+      // Pinned projects bubble to the top of whichever category view the user is on.
+      // When no category filter is active, every category's pinned project still appears first.
+      .sort({ isPinned: -1, order: 1, createdAt: -1 })
+      .lean();
     return projects.map((p) => ({
       _id: String(p._id),
       title: p.title,
@@ -40,9 +49,29 @@ async function getProjects(category?: string) {
       year: p.year,
       client: p.client,
       description: p.description,
+      isPinned: !!p.isPinned,
     }));
   } catch {
     return [];
+  }
+}
+
+/**
+ * Returns a map of category → count of published projects in that category.
+ * Drives the filter row — categories with zero projects are hidden until at
+ * least one project lands in them. "All Work" stays visible whenever any
+ * project exists at all.
+ */
+async function getCategoryCounts(): Promise<Record<string, number>> {
+  try {
+    await connectDB();
+    const result = await Project.aggregate<{ _id: string; count: number }>([
+      { $match: { status: "published" } },
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+    ]);
+    return Object.fromEntries(result.map((r) => [r._id, r.count]));
+  } catch {
+    return {};
   }
 }
 
@@ -52,8 +81,23 @@ export default async function ProjectsPage({
   searchParams: Promise<{ category?: string }>;
 }) {
   const params = await searchParams;
-  const projects = await getProjects(params.category);
+  // Run the two queries in parallel — counts are cheap because they're a single
+  // grouped aggregation, not a per-category roundtrip.
+  const [projects, counts] = await Promise.all([
+    getProjects(params.category),
+    getCategoryCounts(),
+  ]);
   const activeCategory = params.category ?? "all";
+
+  // Hide categories with zero projects. "All Work" stays as long as any project
+  // exists. The currently-active category is also kept visible even if it would
+  // otherwise filter out — that way the user always sees which filter is on.
+  const totalProjects = Object.values(counts).reduce((s, n) => s + n, 0);
+  const visibleCategories = categories.filter((c) => {
+    if (c.value === "all") return totalProjects > 0;
+    if (c.value === activeCategory) return true;
+    return (counts[c.value] ?? 0) > 0;
+  });
 
   return (
     <div className="pt-32">
@@ -63,55 +107,62 @@ export default async function ProjectsPage({
           Projects with <span className="italic font-light text-fire">point of view</span>.
         </h1>
 
-        {/* Category filter */}
-        <div className="flex flex-wrap gap-2 mt-16 mb-20 border-b border-ink-800 pb-1">
-          {categories.map((cat) => {
-            const active = activeCategory === cat.value;
-            const href = cat.value === "all" ? "/projects" : `/projects?category=${cat.value}`;
-            return (
-              <Link
-                key={cat.value}
-                href={href}
-                className={`px-5 py-3 text-sm font-medium tracking-wide transition-colors relative ${
-                  active ? "text-bone" : "text-bone-300 hover:text-bone"
-                }`}
-              >
-                {cat.label}
-                {active && <span className="absolute -bottom-px left-0 right-0 h-px bg-fire" />}
-              </Link>
-            );
-          })}
-        </div>
+        {/* Category filter — only categories with at least one project show */}
+        {visibleCategories.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-16 mb-20 border-b border-ink-800 pb-1">
+            {visibleCategories.map((cat) => {
+              const active = activeCategory === cat.value;
+              const href = cat.value === "all" ? "/projects" : `/projects?category=${cat.value}`;
+              return (
+                <Link
+                  key={cat.value}
+                  href={href}
+                  className={`px-5 py-3 text-sm font-medium tracking-wide transition-colors relative ${
+                    active ? "text-bone" : "text-bone-300 hover:text-bone"
+                  }`}
+                >
+                  {cat.label}
+                  {active && <span className="absolute -bottom-px left-0 right-0 h-px bg-fire" />}
+                </Link>
+              );
+            })}
+          </div>
+        )}
 
         {projects.length === 0 ? (
           <div className="py-24 text-center">
             <p className="text-bone-300">No projects published yet. Check back soon.</p>
           </div>
         ) : (
-          <div className="grid md:grid-cols-2 gap-6 lg:gap-10">
-            {projects.map((p, i) => (
+          // Uniform card grid — every project gets the same treatment. No hero
+          // slot, no asymmetric wide cards. The "main" project is featured on the
+          // home page only; on this index we show everything evenly.
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 lg:gap-10">
+            {projects.map((p) => (
               <Link
                 key={p._id}
                 href={`/projects/${p.slug}`}
-                className={`group block ${i % 3 === 0 ? "md:col-span-2" : ""}`}
+                className="group block"
               >
-                <div
-                  className={`relative overflow-hidden rounded-sm bg-ink-900 ${
-                    i % 3 === 0 ? "aspect-[21/9]" : "aspect-[4/3]"
-                  }`}
-                >
+                <div className="relative overflow-hidden rounded-sm bg-ink-900 aspect-[4/5]">
                   {p.coverImage ? (
                     <Image
                       src={p.coverImage}
                       alt={p.title}
                       fill
                       className="object-cover transition-transform duration-1000 group-hover:scale-105"
-                      sizes="(min-width: 768px) 50vw, 100vw"
+                      sizes="(min-width: 1024px) 33vw, (min-width: 768px) 50vw, 100vw"
                     />
                   ) : (
                     <div className="absolute inset-0 bg-gradient-to-br from-ink-800 to-ink-900" />
                   )}
                   <div className="absolute inset-0 bg-gradient-to-t from-ink/80 via-transparent to-transparent" />
+                  {p.isPinned && (
+                    <div className="absolute top-4 left-4 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-fire text-bone text-[10px] uppercase tracking-[0.15em] font-medium">
+                      <Pin className="h-3 w-3" />
+                      Pinned
+                    </div>
+                  )}
                   <div className="absolute top-6 right-6 h-12 w-12 grid place-items-center rounded-full bg-bone text-ink opacity-0 group-hover:opacity-100 transition-all duration-500 group-hover:rotate-45">
                     <ArrowUpRight className="h-5 w-5" />
                   </div>
@@ -127,7 +178,7 @@ export default async function ProjectsPage({
                         </>
                       )}
                     </div>
-                    <h2 className="font-display text-2xl md:text-3xl font-medium tracking-tight">
+                    <h2 className="font-display text-xl md:text-2xl font-medium tracking-tight">
                       {p.title}
                     </h2>
                     {p.client && <p className="text-sm text-bone-300 mt-1">for {p.client}</p>}
