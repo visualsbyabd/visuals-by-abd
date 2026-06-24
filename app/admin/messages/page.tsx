@@ -1,127 +1,101 @@
-import { notFound, redirect } from "next/navigation";
-import Link from "next/link";
+import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { connectDB } from "@/lib/mongodb";
-import { Project } from "@/models/Project";
 import { Message } from "@/models/Message";
+import { Project } from "@/models/Project";
 import { User } from "@/models/User";
-import { MessagesThread, type Message as ThreadMessage } from "@/components/portal/messages-thread";
-import { ConversationToolbar } from "@/components/admin/conversation-toolbar";
-import { ArrowLeft, Mail, Building2, FolderKanban } from "lucide-react";
-import { markConversationRead } from "@/features/messages/actions";
+import { MessagesInbox } from "@/components/admin/messages-inbox";
 
 export const dynamic = "force-dynamic";
 
-async function getConversation(projectId: string) {
+export type ConversationCard = {
+  projectId: string;
+  projectTitle: string;
+  clientName?: string;
+  clientCompany?: string;
+  lastMessage: string;
+  lastSender: string;
+  lastSenderRole: string;
+  lastAt: string;
+  unread: boolean;
+  unreadCount: number;
+  total: number;
+  archived: boolean;
+  assignedTo?: { _id: string; name: string };
+};
+
+async function getConversations(userId: string): Promise<ConversationCard[]> {
   await connectDB();
-  const project = await Project.findById(projectId)
-    .populate<{
-      clientRef: { _id: string; name: string; company?: string; email: string; user?: string };
-    }>("clientRef", "name company email user")
-    .populate<{ messagesAssignedTo: { _id: string; name: string } }>("messagesAssignedTo", "name")
+
+  // Fetch all messages, group by project in JS. For thousands of conversations
+  // this would want a real aggregation; for a small studio this is plenty fast.
+  const all = await Message.find()
+    .sort({ createdAt: -1 })
+    .select("project body sender readBy createdAt")
     .lean();
-  if (!project) return null;
 
-  const rawMessages = await Message.find({ project: projectId }).sort({ createdAt: 1 }).lean();
-  const userIds = new Set<string>();
-  for (const m of rawMessages) {
-    userIds.add(String(m.sender));
-    for (const r of m.reactions ?? []) for (const u of r.users ?? []) userIds.add(String(u));
+  if (all.length === 0) return [];
+
+  type Group = { last: typeof all[0]; total: number; unread: number };
+  const groups = new Map<string, Group>();
+  for (const m of all) {
+    const k = String(m.project);
+    const existing = groups.get(k);
+    if (existing) {
+      existing.total++;
+      if (!m.readBy.some((u) => String(u) === userId)) existing.unread++;
+    } else {
+      groups.set(k, {
+        last: m,
+        total: 1,
+        unread: m.readBy.some((u) => String(u) === userId) ? 0 : 1,
+      });
+    }
   }
-  const users = userIds.size
-    ? await User.find({ _id: { $in: Array.from(userIds) } }).select("name role").lean()
-    : [];
-  const userMap = new Map(users.map((u) => [String(u._id), { _id: String(u._id), name: u.name, role: u.role }]));
 
-  const messages: ThreadMessage[] = rawMessages.map((m) => ({
-    _id: String(m._id),
-    body: m.body,
-    attachments: m.attachments,
-    sender: userMap.get(String(m.sender)) ?? { name: "Unknown", role: "client" },
-    senderId: String(m.sender),
-    parent: m.parent ? String(m.parent) : undefined,
-    mentions: (m.mentions ?? []).map((id) => String(id)),
-    reactions: (m.reactions ?? []).map((r) => ({
-      emoji: r.emoji,
-      users: (r.users ?? []).map((u) => String(u)),
-    })),
-    editedAt: m.editedAt?.toISOString(),
-    createdAt: m.createdAt.toISOString(),
-  }));
+  const projectIds = Array.from(groups.keys());
+  const senderIds = Array.from(groups.values()).map((g) => g.last.sender);
 
-  return { project, messages };
+  const [projects, users] = await Promise.all([
+    Project.find({ _id: { $in: projectIds } })
+      .populate<{ clientRef: { name: string; company?: string } }>("clientRef", "name company")
+      .populate<{ messagesAssignedTo: { _id: string; name: string } }>("messagesAssignedTo", "name")
+      .lean(),
+    User.find({ _id: { $in: senderIds } }).select("name role").lean(),
+  ]);
+
+  const projectMap = new Map(projects.map((p) => [String(p._id), p]));
+  const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+  const cards: ConversationCard[] = [];
+  for (const [projectId, group] of groups.entries()) {
+    const project = projectMap.get(projectId);
+    if (!project) continue;
+    const sender = userMap.get(String(group.last.sender));
+    cards.push({
+      projectId,
+      projectTitle: project.title,
+      clientName: project.clientRef?.name,
+      clientCompany: project.clientRef?.company,
+      lastMessage: group.last.body,
+      lastSender: sender?.name ?? "Unknown",
+      lastSenderRole: sender?.role ?? "client",
+      lastAt: group.last.createdAt.toISOString(),
+      unread: group.unread > 0,
+      unreadCount: group.unread,
+      total: group.total,
+      archived: !!project.messagesArchivedAt,
+      assignedTo: project.messagesAssignedTo
+        ? { _id: String(project.messagesAssignedTo._id), name: project.messagesAssignedTo.name }
+        : undefined,
+    });
+  }
+  return cards.sort((a, b) => new Date(b.lastAt).getTime() - new Date(a.lastAt).getTime());
 }
 
-export default async function ConversationPage({ params }: { params: Promise<{ projectId: string }> }) {
+export default async function AdminMessagesPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
-  const { projectId } = await params;
-  const data = await getConversation(projectId);
-  if (!data) notFound();
-  const { project, messages } = data;
-
-  // Mark conversation as read on view (best effort, fire and forget)
-  await markConversationRead(projectId).catch(() => {});
-
-  return (
-    <div className="space-y-6">
-      <Link
-        href="/admin/messages"
-        className="inline-flex items-center gap-2 text-sm text-bone-300 hover:text-fire transition-colors"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        All conversations
-      </Link>
-
-      <header className="border border-ink-800 rounded-sm p-6">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="min-w-0 flex-1">
-            <p className="eyebrow mb-2">— Conversation</p>
-            <h1 className="display-md leading-tight">{project.clientRef?.name ?? "Unknown client"}</h1>
-            <div className="mt-3 flex items-center gap-4 text-sm text-bone-300 flex-wrap">
-              {project.clientRef?.company && (
-                <span className="inline-flex items-center gap-1.5">
-                  <Building2 className="h-3.5 w-3.5 text-bone-400" />
-                  {project.clientRef.company}
-                </span>
-              )}
-              {project.clientRef?.email && (
-                <a
-                  href={`mailto:${project.clientRef.email}`}
-                  className="inline-flex items-center gap-1.5 hover:text-fire transition-colors"
-                >
-                  <Mail className="h-3.5 w-3.5 text-bone-400" />
-                  {project.clientRef.email}
-                </a>
-              )}
-              <Link
-                href={`/admin/projects/${project._id}`}
-                className="inline-flex items-center gap-1.5 hover:text-fire transition-colors"
-              >
-                <FolderKanban className="h-3.5 w-3.5 text-bone-400" />
-                {project.title}
-              </Link>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <ConversationToolbar
-        projectId={String(project._id)}
-        archived={!!project.messagesArchivedAt}
-        internalNotes={project.messagesInternalNotes ?? ""}
-        assignedTo={
-          project.messagesAssignedTo
-            ? { _id: String(project.messagesAssignedTo._id), name: project.messagesAssignedTo.name }
-            : null
-        }
-      />
-
-      <MessagesThread
-        projectId={String(project._id)}
-        messages={messages}
-        currentUserId={session.user.id}
-      />
-    </div>
-  );
+  const conversations = await getConversations(session.user.id);
+  return <MessagesInbox conversations={conversations} />;
 }

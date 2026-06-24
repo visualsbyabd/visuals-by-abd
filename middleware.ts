@@ -32,15 +32,23 @@ export default async function middleware(req: NextRequest) {
   // Read the JWT cookie. getToken is Edge-safe (no DB calls) and just decodes
   // the cookie with AUTH_SECRET. If the cookie is missing/invalid/expired,
   // returns null — which is exactly what we want for the unauthenticated case.
-  const token = await getToken({
-    req,
-    secret: process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET,
-    // In production behind https, Auth.js v5 uses __Secure- prefixed cookies.
-    secureCookie: process.env.NODE_ENV === "production",
-    // Cookie name must match what Auth.js v5 sets in production. v5 uses
-    // "authjs.session-token" in dev and "__Secure-authjs.session-token" in prod.
-    // getToken auto-detects this when secureCookie is set correctly.
-  });
+  //
+  // Wrapped in try/catch because if AUTH_SECRET is misconfigured or the cookie
+  // is malformed, getToken throws. We never want middleware to throw — that
+  // produces an opaque 500 instead of the correct "go to login" redirect.
+  let token: Awaited<ReturnType<typeof getToken>> = null;
+  try {
+    token = await getToken({
+      req,
+      secret: process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET,
+      secureCookie: process.env.NODE_ENV === "production",
+    });
+  } catch (e) {
+    if (process.env.NODE_ENV !== "production") {
+      console.error("[middleware] getToken threw:", e);
+    }
+    // Fall through with token=null — treat as unauthenticated.
+  }
 
   const isLoggedIn = !!token;
   const role = (token?.role as string | undefined) ?? undefined;

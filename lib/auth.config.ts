@@ -56,5 +56,12 @@ export const authConfig = {
       }
       return session;
     },
+    // Explicitly always-allow. Without this, Auth.js v5 beta-25 has a default
+    // behavior in some code paths that redirects unauthenticated requests to
+    // the signIn page. Returning true unconditionally tells Auth.js: "trust
+    // the middleware to handle routing; never auto-redirect on my behalf."
+    authorized() {
+      return true;
+    },
   },
 } satisfies NextAuthConfig;
