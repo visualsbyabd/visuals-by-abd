@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -21,7 +21,7 @@ import {
 
 type Mode = "password" | "magic";
 
-export function LoginForm() {
+ function LoginFormInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const from = searchParams.get("from") ?? "/admin";
@@ -62,9 +62,8 @@ export function LoginForm() {
             setMode("password");
             setError(null);
           }}
-          className={`flex items-center justify-center gap-2 px-3 py-2.5 text-xs uppercase tracking-[0.18em] transition-colors ${
-            mode === "password" ? "bg-fire text-bone" : "text-bone-300 hover:bg-ink-900"
-          }`}
+          className={`flex items-center justify-center gap-2 px-3 py-2.5 text-xs uppercase tracking-[0.18em] transition-colors ${mode === "password" ? "bg-fire text-bone" : "text-bone-300 hover:bg-ink-900"
+            }`}
         >
           <KeyRound className="h-3.5 w-3.5" />
           Password
@@ -75,9 +74,8 @@ export function LoginForm() {
             setMode("magic");
             setError(null);
           }}
-          className={`flex items-center justify-center gap-2 px-3 py-2.5 text-xs uppercase tracking-[0.18em] transition-colors ${
-            mode === "magic" ? "bg-fire text-bone" : "text-bone-300 hover:bg-ink-900"
-          }`}
+          className={`flex items-center justify-center gap-2 px-3 py-2.5 text-xs uppercase tracking-[0.18em] transition-colors ${mode === "magic" ? "bg-fire text-bone" : "text-bone-300 hover:bg-ink-900"
+            }`}
         >
           <Mail className="h-3.5 w-3.5" />
           Email link
@@ -198,5 +196,13 @@ function MagicLinkForm() {
         {sending ? "Sending..." : "Email me a sign-in link"}
       </Button>
     </form>
+  );
+}
+
+export function LoginForm() {
+  return (
+    <Suspense fallback={null}>
+      <LoginFormInner />
+    </Suspense>
   );
 }
